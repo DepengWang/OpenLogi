@@ -13,6 +13,17 @@ pub(crate) fn user_cache_root() -> PathBuf {
         .map_or_else(|_| PathBuf::from("./assets"), |d| d.join("assets"))
 }
 
+/// User-managed override root: `openlogi_core::paths::data_dir()` plus an
+/// `assets-override/` subdir, a sibling of the sync cache so neither
+/// [`user_cache_root`] syncs nor "clear cache" ever touch it. A depot dir
+/// here (e.g. `assets-override/k375s/front.png` + `metadata.json`) is read
+/// before the bundle and the cache, which lets a user swap a device render.
+pub(super) fn user_override_root() -> Option<PathBuf> {
+    openlogi_core::paths::data_dir()
+        .ok()
+        .map(|d| d.join("assets-override"))
+}
+
 /// Read-only root pointing inside the macOS `.app` bundle when the binary
 /// is launched from one: `<exe_dir>/../Resources/assets/`. The probe also
 /// requires an `index.json` inside — an empty dir (e.g. `cargo bundle`

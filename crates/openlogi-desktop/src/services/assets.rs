@@ -46,7 +46,7 @@ use self::images::{
     variant_image_for,
 };
 pub(crate) use self::paths::user_cache_root;
-use self::paths::{bundle_assets_root, load_index};
+use self::paths::{bundle_assets_root, load_index, user_override_root};
 
 /// Total bytes of the per-user asset cache — the tier [`sync`] writes and
 /// [`clear_cache`] removes. The read-only app bundle (release builds) is a
@@ -238,7 +238,13 @@ impl AssetResolver {
         let write_root = user_cache_root();
         let bundle = bundle_assets_root();
         let has_bundle = bundle.is_some();
-        let mut read_roots = Vec::with_capacity(2);
+        let mut read_roots = Vec::with_capacity(3);
+        // User override first: a depot dir here beats the bundle and the cache.
+        // Roots without a matching depot dir fall through to the next root.
+        if let Some(o) = user_override_root().filter(|o| o.is_dir()) {
+            debug!(path = %o.display(), "user asset override root detected");
+            read_roots.push(o);
+        }
         if let Some(b) = bundle {
             debug!(path = %b.display(), "bundle assets root detected");
             read_roots.push(b);
