@@ -352,6 +352,16 @@ pub(super) fn build_device_list(
     if std::env::var_os("OPENLOGI_DEMO_KEYBOARD").is_some() {
         list.push(demo_keyboard());
     }
+    // Cameras are UVC, not HID++, so they come from a parallel discovery path
+    // (AVFoundation on macOS) rather than the receiver inventory. The caller
+    // enumerates them off the UI thread — discovery is too slow for the render
+    // path — so this assembly stays pure; the merge in
+    // `super::AppState::refresh_inventories` reconciles them by inventory key.
+    // They go in before the offline placeholders so a live camera's saved
+    // identity (same config key) does not come back as a second, offline card.
+    for camera in cameras {
+        list.push(camera_record(camera, resolver));
+    }
     let present_receivers: HashSet<String> = inventories
         .iter()
         .filter_map(|inv| inv.receiver.unique_id.as_deref())
@@ -361,14 +371,6 @@ pub(super) fn build_device_list(
         .known_identities()
         .filter(|(key, _)| !folded_keys.contains(*key));
     append_offline_known(&mut list, known, resolver, &present_receivers, config);
-    // Cameras are UVC, not HID++, so they come from a parallel discovery path
-    // (AVFoundation on macOS) rather than the receiver inventory. The caller
-    // enumerates them off the UI thread — discovery is too slow for the render
-    // path — so this assembly stays pure; the merge in
-    // `super::AppState::refresh_inventories` reconciles them by inventory key.
-    for camera in cameras {
-        list.push(camera_record(camera, resolver));
-    }
     apply_custom_names(&mut list, config);
     sort_device_list(&mut list);
     list

@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, HashSet};
 
 use openlogi_core::config::{Config, DeviceIdentity};
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::device::{
+    DeviceInventory, DeviceKind, DeviceModelInfo, DeviceTransports, StandaloneDevice,
+};
 use openlogi_core::device_order::PhysicalDeviceKey;
 use openlogi_core::hid::DeviceRoute;
 use tracing::debug;
@@ -661,6 +663,22 @@ impl super::AppState {
     }
 }
 
+/// The model identity a camera is persisted with: just its USB product id in
+/// `model_ids[0]`, the key the asset registry's camera depots use. A live camera
+/// record carries no `model_info` (it must stay out of every HID++ path), so the
+/// pid is read back from its `model_key`.
+fn camera_identity_model_info(record: &DeviceRecord) -> Option<DeviceModelInfo> {
+    let product_id = u16::from_str_radix(&record.model_key, 16).ok()?;
+    Some(DeviceModelInfo {
+        entity_count: 0,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports::default(),
+        model_ids: [product_id, 0, 0],
+        extended_model_id: 0,
+    })
+}
+
 pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> bool {
     let mut changed = false;
     for record in list {
@@ -671,16 +689,33 @@ pub(super) fn persist_identities(config: &mut Config, list: &[DeviceRecord]) -> 
             continue;
         };
         let capabilities = record.capabilities.unwrap_or_default();
-        if record.light_capabilities.is_none() && record.capabilities.is_none() {
+        // A UVC camera has no HID++ capabilities, but its identity is still
+        // worth keeping so it can come back as an offline card.
+        let is_camera = record.kind == DeviceKind::Camera;
+        if !is_camera && record.light_capabilities.is_none() && record.capabilities.is_none() {
             continue;
         }
+        // Only a camera whose model the asset registry recognises is remembered.
+        // One we cannot identify is shown while it is plugged in, but never
+        // kept as an offline card.
+        if is_camera && (record.asset.is_none() || camera_identity_model_info(record).is_none()) {
+            continue;
+        }
+        let (model_info, codename) = if is_camera {
+            (
+                camera_identity_model_info(record),
+                Some(record.model_name.clone()),
+            )
+        } else {
+            (record.model_info.clone(), record.codename.clone())
+        };
         let identity = DeviceIdentity {
             display_name: record.model_name.clone(),
             kind: record.kind,
             capabilities,
             light_capabilities: record.light_capabilities,
-            model_info: record.model_info.clone(),
-            codename: record.codename.clone(),
+            model_info,
+            codename,
             driver_id: record.driver_id.clone(),
             registry_model_id: record.registry_model_id.clone(),
         }

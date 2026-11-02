@@ -271,3 +271,67 @@ fn enabling_camera_automation_queues_effective_camera_power() {
     assert!(!state.light().enabled);
     assert!(state.light_enabled());
 }
+
+/// A camera seen online keeps a card once it is unplugged: the identity saved
+/// while it was live restores an offline record, and a camera that is live
+/// again is not duplicated by its own saved identity.
+#[test]
+fn an_unplugged_camera_stays_in_the_list_as_an_offline_card() {
+    let camera = Camera {
+        name: "Logitech StreamCam".to_string(),
+        unique_id: "0x1123000046d0893".to_string(),
+        serial_number: None,
+        vendor_id: 0x046d,
+        product_id: 0x0893,
+        max_resolution: None,
+        max_fps: None,
+    };
+    let resolver = AssetResolver::new();
+    let mut config = Config::default();
+
+    let live = build_device_list(&[], &[], &resolver, &config, std::slice::from_ref(&camera));
+    // Only a model the asset registry recognises is remembered, and that needs
+    // the StreamCam's depot in the local cache — absent on a clean machine.
+    if live[0].asset.is_none() {
+        return;
+    }
+    assert!(super::super::inventory::persist_identities(
+        &mut config,
+        &live
+    ));
+
+    let still_live = build_device_list(&[], &[], &resolver, &config, std::slice::from_ref(&camera));
+    assert_eq!(still_live.len(), 1, "no duplicate beside the live camera");
+    assert!(still_live[0].online);
+
+    let unplugged = build_device_list(&[], &[], &resolver, &config, &[]);
+    assert_eq!(unplugged.len(), 1);
+    assert!(!unplugged[0].online);
+    assert_eq!(unplugged[0].kind, DeviceKind::Camera);
+    // An offline card is named from the asset registry, like any other model.
+    assert!(unplugged[0].model_name.contains("StreamCam"));
+}
+
+/// A camera whose model the registry does not know is never remembered, so it
+/// cannot linger as an offline card.
+#[test]
+fn an_unrecognised_camera_is_not_remembered() {
+    let camera = Camera {
+        name: "Mystery Cam".to_string(),
+        unique_id: "0x1123000046dffff".to_string(),
+        serial_number: None,
+        vendor_id: 0x046d,
+        product_id: 0xffff,
+        max_resolution: None,
+        max_fps: None,
+    };
+    let resolver = AssetResolver::new();
+    let mut config = Config::default();
+
+    let live = build_device_list(&[], &[], &resolver, &config, std::slice::from_ref(&camera));
+    assert!(!super::super::inventory::persist_identities(
+        &mut config,
+        &live
+    ));
+    assert!(build_device_list(&[], &[], &resolver, &config, &[]).is_empty());
+}
