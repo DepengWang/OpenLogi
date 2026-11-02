@@ -280,6 +280,12 @@ pub struct AppSettings {
     /// Layout used for the Home device gallery. Defaults to the responsive grid.
     #[serde(default)]
     pub device_view_mode: DeviceViewMode,
+    /// Record keys of the Home gallery cards in the order the user dragged
+    /// them into. Within the connected and offline groups a card follows its
+    /// position here; a card not listed keeps its canonical place after the
+    /// listed ones. Empty until the user reorders a card.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub device_order: Vec<String>,
     /// Name of the theme used in light mode (a [`crate`]-agnostic string
     /// matching a gpui-component theme, e.g. `"OpenLogi Light"`). `None` uses
     /// the OpenLogi brand light theme.
@@ -515,6 +521,7 @@ impl Default for AppSettings {
             appearance: Appearance::System,
             ui_scale: UiScale::Normal,
             device_view_mode: DeviceViewMode::Grid,
+            device_order: Vec::new(),
             app_icon: AppIcon::Openlogi,
             theme_light: None,
             theme_dark: None,

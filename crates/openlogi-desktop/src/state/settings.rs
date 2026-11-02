@@ -180,6 +180,18 @@ impl AppState {
         self.persist_config("device view mode");
         StateEvent::SettingsChanged.into()
     }
+    /// Persist the order the user dragged the Home gallery cards into
+    /// (`order` lists record keys, first card first). An unchanged order
+    /// writes nothing and is still reported.
+    pub fn commit_device_order(&mut self, order: Vec<String>) -> StateEvents {
+        if self.config.app_settings.device_order == order {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.app_settings.device_order = order);
+        self.persist_config("device order");
+        StateEvent::SettingsChanged.into()
+    }
     /// Whether OpenLogi manages `key` (capture + volatile re-apply).
     #[must_use]
     pub fn device_enabled(&self, key: &str) -> bool {

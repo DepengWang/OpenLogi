@@ -259,3 +259,21 @@ fn an_unknown_update_channel_is_rejected() {
     .expect_err("an unknown channel must not load as another one");
     assert!(error.to_string().contains("nightly"), "{error}");
 }
+
+#[test]
+fn device_order_roundtrips_and_is_omitted_until_set() {
+    let mut cfg = Config::default();
+    let untouched = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(!untouched.contains("device_order"));
+
+    cfg.app_settings.device_order = vec!["unit:b".to_string(), "unit:a".to_string()];
+    let parsed = write_and_read(&cfg);
+    let without_preference: Config = toml::from_str(
+        "schema_version = 4
+",
+    )
+    .expect("config predating the order loads");
+
+    assert_eq!(parsed.app_settings.device_order, ["unit:b", "unit:a"]);
+    assert!(without_preference.app_settings.device_order.is_empty());
+}

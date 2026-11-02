@@ -1169,7 +1169,33 @@ fn gallery_order_moves_connected_devices_first_stably() {
     records[0].online = false;
     records[2].online = false;
 
-    assert_eq!(ordered_device_indices(&records), vec![1, 3, 0, 2]);
+    assert_eq!(ordered_device_indices(&records, &[]), vec![1, 3, 0, 2]);
+}
+
+#[test]
+fn gallery_order_follows_the_dragged_order_within_each_group() {
+    let mut records = vec![
+        record(DeviceKind::Mouse, None),
+        record(DeviceKind::Keyboard, None),
+        record(DeviceKind::Trackball, None),
+        record(DeviceKind::Light, None),
+    ];
+    records[0].online = false;
+    records[2].online = false;
+    // `record()` gives every record the same key; the order is keyed on it.
+    for (index, record) in records.iter_mut().enumerate() {
+        record.config_key = format!("card-{index}");
+    }
+    let key = |index: usize| records[index].record_key();
+
+    // The user put 3 before 1 and 2 before 0: each group follows that, and the
+    // connected group still comes first.
+    let order = vec![key(3), key(1), key(2), key(0)];
+    assert_eq!(ordered_device_indices(&records, &order), vec![3, 1, 2, 0]);
+
+    // A card the user never placed keeps its canonical place after placed ones.
+    let order = vec![key(3)];
+    assert_eq!(ordered_device_indices(&records, &order), vec![3, 1, 0, 2]);
 }
 
 /// #1699: unlike the #127 scenario below, kind resolution itself can stay

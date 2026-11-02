@@ -1,9 +1,9 @@
 //! Switchable grid, list, and carousel layouts for the Home device gallery.
 
 use gpui::{
-    AnyElement, App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels,
-    Rems, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px, rems, rgb,
+    AnyElement, App, AppContext as _, Context, ElementId, InteractiveElement, IntoElement,
+    ParentElement, Pixels, Rems, Render, RenderOnce, SharedString, StatefulInteractiveElement as _,
+    Styled, Window, div, prelude::FluentBuilder as _, px, rems, rgb,
 };
 use gpui_base::Button as BaseButton;
 use gpui_component::{
@@ -116,12 +116,95 @@ pub(in crate::app) fn device_gallery(window: &Window, cx: &mut Context<AppView>)
     }
 }
 
-/// Connected devices first, preserving AppState's deterministic route order
-/// within the connected and offline groups.
-pub(in crate::app) fn ordered_device_indices(records: &[DeviceRecord]) -> Vec<usize> {
+/// Connected devices first. Within the connected and offline groups a card
+/// follows the user's dragged `order` (record keys); a card the user never
+/// placed keeps AppState's deterministic route order, after the placed ones.
+/// The sort is stable, which is what preserves that route order.
+pub(in crate::app) fn ordered_device_indices(
+    records: &[DeviceRecord],
+    order: &[String],
+) -> Vec<usize> {
     let mut indices: Vec<_> = (0..records.len()).collect();
-    indices.sort_by_key(|index| !records[*index].online);
+    indices.sort_by_key(|&index| {
+        let record = &records[index];
+        let key = record.record_key();
+        let placed = order
+            .iter()
+            .position(|placed| *placed == key)
+            .unwrap_or(usize::MAX);
+        (!record.online, placed)
+    });
     indices
+}
+
+/// What a dragged gallery card carries, and — as its own [`Render`] — the
+/// small chip that follows the pointer while it is dragged.
+#[derive(Clone)]
+struct DraggedDevice {
+    record_key: String,
+    name: SharedString,
+}
+
+impl Render for DraggedDevice {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let pal = theme::palette(cx);
+        div()
+            .px_3()
+            .py_2()
+            .rounded(pal.card_radius)
+            .border_1()
+            .border_color(rgb(theme::ACCENT_BLUE))
+            .bg(pal.panel)
+            .shadow_md()
+            .opacity(0.9)
+            .child(self.name.clone())
+    }
+}
+
+/// `visible` with `dragged` moved into `target`'s place, the cards in between
+/// shifting by one. `None` when either key is missing or they are the same
+/// card, so a no-op drop writes nothing.
+fn moved_into_place(visible: &[String], dragged: &str, target: &str) -> Option<Vec<String>> {
+    let from = visible.iter().position(|key| key == dragged)?;
+    let to = visible.iter().position(|key| key == target)?;
+    if from == to {
+        return None;
+    }
+    let mut order = visible.to_vec();
+    let moved = order.remove(from);
+    order.insert(to, moved);
+    Some(order)
+}
+
+/// Make a gallery card draggable and a drop target. Dropping a card on
+/// another takes that card's place and saves the new order. `visible` is the
+/// record keys in the order the gallery is showing them now.
+fn reorderable(card: BaseButton, record: &DeviceRecord, visible: Vec<String>) -> BaseButton {
+    let dragged = DraggedDevice {
+        record_key: record.record_key(),
+        name: record.display_name.clone().into(),
+    };
+    let target = dragged.record_key.clone();
+    card.on_drag(dragged, |dragged, _offset, _window, cx| {
+        cx.new(|_| dragged.clone())
+    })
+    .drag_over::<DraggedDevice>(|style, _, _, _| {
+        style.border_color(rgb(theme::ACCENT_BLUE)).shadow_md()
+    })
+    .on_drop::<DraggedDevice>(move |dragged, _window, cx| {
+        let Some(order) = moved_into_place(&visible, &dragged.record_key, &target) else {
+            return;
+        };
+        AppState::apply(cx, |state| state.commit_device_order(order));
+    })
+}
+
+/// Record keys of every device in the order the gallery shows them now.
+fn visible_keys(state: &AppState) -> Vec<String> {
+    ordered_device_indices(state.devices(), &state.app_settings().device_order)
+        .into_iter()
+        .map(|index| state.devices()[index].record_key())
+        .collect()
 }
 
 /// Columns of the Home grid across `width`: as many minimum-width cards as
@@ -152,13 +235,18 @@ fn device_grid(window: &Window, cx: &mut Context<AppView>) -> impl IntoElement {
     );
     let cards = AppState::try_read(cx).map_or_else(Vec::new, |state| {
         let active_idx = state.selected_device_index().unwrap_or(0);
-        ordered_device_indices(state.devices())
+        let visible = visible_keys(state);
+        ordered_device_indices(state.devices(), &state.app_settings().device_order)
             .into_iter()
             .enumerate()
             .map(|(position, idx)| {
-                device_card_element(state, idx, active_idx, view.clone(), pal)
-                    .debug_selector(move || format!("home-grid-card-{position}"))
-                    .context_menu(device_menu(&state.devices()[idx]))
+                reorderable(
+                    device_card_element(state, idx, active_idx, view.clone(), pal),
+                    &state.devices()[idx],
+                    visible.clone(),
+                )
+                .debug_selector(move || format!("home-grid-card-{position}"))
+                .context_menu(device_menu(&state.devices()[idx]))
             })
             .collect()
     });
@@ -186,11 +274,16 @@ fn device_list(cx: &mut Context<AppView>) -> impl IntoElement {
     let pal = theme::palette(cx);
     let rows = AppState::try_read(cx).map_or_else(Vec::new, |state| {
         let active_idx = state.selected_device_index().unwrap_or(0);
-        ordered_device_indices(state.devices())
+        let visible = visible_keys(state);
+        ordered_device_indices(state.devices(), &state.app_settings().device_order)
             .into_iter()
             .map(|idx| {
-                device_list_row(state, idx, active_idx, view.clone(), pal)
-                    .context_menu(device_menu(&state.devices()[idx]))
+                reorderable(
+                    device_list_row(state, idx, active_idx, view.clone(), pal),
+                    &state.devices()[idx],
+                    visible.clone(),
+                )
+                .context_menu(device_menu(&state.devices()[idx]))
             })
             .collect()
     });
@@ -217,7 +310,7 @@ fn device_carousel(cx: &mut Context<AppView>) -> impl IntoElement {
         || (Vec::new(), 0),
         |state| {
             let active_idx = state.selected_device_index().unwrap_or(0);
-            let order = ordered_device_indices(state.devices());
+            let order = ordered_device_indices(state.devices(), &state.app_settings().device_order);
             let selected = order.iter().position(|idx| *idx == active_idx).unwrap_or(0);
             (order, selected)
         },
@@ -426,5 +519,35 @@ fn device_accessibility_description(record: &DeviceRecord) -> SharedString {
         format!("{metadata} {battery}.").into()
     } else {
         metadata.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::moved_into_place;
+
+    fn keys(list: &[&str]) -> Vec<String> {
+        list.iter().map(|key| (*key).to_string()).collect()
+    }
+
+    #[test]
+    fn a_dragged_card_takes_the_targets_place() {
+        let visible = keys(&["a", "b", "c", "d"]);
+        assert_eq!(
+            moved_into_place(&visible, "a", "c"),
+            Some(keys(&["b", "c", "a", "d"]))
+        );
+        assert_eq!(
+            moved_into_place(&visible, "d", "b"),
+            Some(keys(&["a", "d", "b", "c"]))
+        );
+    }
+
+    #[test]
+    fn a_drop_that_changes_nothing_writes_nothing() {
+        let visible = keys(&["a", "b"]);
+        assert_eq!(moved_into_place(&visible, "a", "a"), None);
+        assert_eq!(moved_into_place(&visible, "a", "missing"), None);
+        assert_eq!(moved_into_place(&visible, "missing", "a"), None);
     }
 }

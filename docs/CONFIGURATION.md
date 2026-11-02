@@ -53,6 +53,8 @@ optional physical device key.
 - `asset_source`: `automatic`, `openlogi`, `cloudflare`, or `fastly`
 - `language`, `appearance`, `device_view_mode` (`grid`, `list`, or `carousel`),
   optional theme names, and optional UI radius
+- `device_order`: the Home gallery cards' record keys in the order you dragged them into.
+  Written by the app; omitted until you reorder a card
 - `smooth_scroll` toggles finite animation for traditional mouse-wheel input. With it
   off, a diverted horizontal thumb wheel still scrolls as a phased gesture (ended after
   120 ms idle) so apps that reveal content on horizontal swipes, like Messages, react;
