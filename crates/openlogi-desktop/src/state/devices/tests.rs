@@ -6,8 +6,6 @@ use openlogi_core::device::{
 use crate::services::assets::AssetResolver;
 use crate::services::i18n::LOCALE_LOCK;
 
-use std::collections::HashSet;
-
 use super::{
     Camera, Capabilities, DeviceIdentity, DeviceKind, DeviceModelInfo, DeviceRecord,
     DeviceTransports, adopt_transient_record, append_offline_known, build_device_list,
@@ -513,13 +511,7 @@ fn known_devices_are_appended_only_when_absent_from_live() {
     let a = mouse_identity("live A overwritten?");
     let b = mouse_identity("asleep B");
     let resolver = AssetResolver::new();
-    append_offline_known(
-        &mut list,
-        [("A", &a), ("B", &b)].into_iter(),
-        &resolver,
-        &HashSet::new(),
-        &Config::default(),
-    );
+    append_offline_known(&mut list, [("A", &a), ("B", &b)].into_iter(), &resolver);
 
     assert_eq!(list.len(), 2);
     assert!(
@@ -570,8 +562,6 @@ fn historical_zero_unit_identity_does_not_create_offline_card() {
         &mut list,
         [("direct:046d:b023:unit:00000000", &id)].into_iter(),
         &resolver,
-        &HashSet::new(),
-        &Config::default(),
     );
 
     assert!(list.is_empty());
@@ -593,8 +583,6 @@ fn same_model_physical_bluetooth_devices_remain_distinct() {
         ]
         .into_iter(),
         &resolver,
-        &HashSet::new(),
-        &Config::default(),
     );
 
     assert_eq!(list.len(), 2);
@@ -614,96 +602,67 @@ fn persisted_selection_does_not_target_transient_identity() {
 }
 
 #[test]
-fn placeholders_for_absent_receivers_are_hidden() {
-    // The work receiver's mouse must not haunt the list at home: with its
-    // receiver unplugged the device is unreachable, so no card is shown.
+fn placeholders_for_absent_receivers_stay_visible() {
+    // A paired device stays in the list until it is deleted, even while the
+    // receiver it was paired to is not plugged in (the work mouse at home).
     let id = mouse_identity("MX Master 3S");
     let resolver = AssetResolver::new();
     let mut list = Vec::new();
     append_offline_known(
         &mut list,
-        [("receiver:aabb:slot:1", &id)].into_iter(),
+        [("receiver:aabb:slot:1", &id), ("unit:6be9d300", &id)].into_iter(),
         &resolver,
-        &HashSet::new(),
-        &Config::default(),
     );
-    assert!(list.is_empty());
-    append_offline_known(
-        &mut list,
-        [("receiver:aabb:slot:1", &id)].into_iter(),
-        &resolver,
-        &HashSet::from(["aabb".to_string()]),
-        &Config::default(),
-    );
-    assert_eq!(list.len(), 1);
+    assert_eq!(list.len(), 2);
+    assert!(list.iter().all(|record| !record.online));
 }
 
 #[test]
-fn adopted_placeholder_is_hidden_when_its_linked_receiver_is_absent() {
-    // Once a Bolt device is adopted its entry key becomes its own
-    // identity (`unit:…`), not `receiver:<uid>:slot:<n>` — reachability
-    // must be resolved through the entry's `links`, not its key, or the
-    // work receiver's mouse haunts the list at home again.
+fn an_unanswering_paired_slot_takes_its_model_from_the_saved_identity() {
+    // The receiver reports slot 2 as paired but asleep, with no model info.
+    // Its route is recorded under the keyboard's own entry, so the card keeps
+    // that entry's model rather than the generic silhouette.
     let mut config = Config::default();
     let mut device = DeviceConfig::default();
-    device
-        .links
-        .insert("receiver:aabb:slot:1".to_string(), LinkConfig::default());
-    config.devices.insert("unit:6be9d300".to_string(), device);
-    let id = mouse_identity("MX Master 3S");
-    let resolver = AssetResolver::new();
-
-    let mut list = Vec::new();
-    append_offline_known(
-        &mut list,
-        [("unit:6be9d300", &id)].into_iter(),
-        &resolver,
-        &HashSet::new(),
-        &config,
+    device.links.insert(
+        "receiver:da2699e1:slot:2".to_string(),
+        LinkConfig::default(),
     );
-    assert!(list.is_empty());
+    let mut identity = mouse_identity("K370s/K375s");
+    identity.kind = DeviceKind::Keyboard;
+    identity.codename = Some("K370s/K375s Multi-Device Wireless Keyboard".to_string());
+    identity.model_info = Some(DeviceModelInfo {
+        entity_count: 3,
+        serial_number: None,
+        unit_id: [0; 4],
+        transports: DeviceTransports::default(),
+        model_ids: [0xb34c, 0x4061, 0],
+        extended_model_id: 0,
+    });
+    device.identity = Some(identity);
+    config.devices.insert("unit:79edb7ae".to_string(), device);
 
-    append_offline_known(
-        &mut list,
-        [("unit:6be9d300", &id)].into_iter(),
-        &resolver,
-        &HashSet::from(["aabb".to_string()]),
+    let mut asleep = paired_device_no_model_info(2, Some(0x4061));
+    asleep.online = false;
+    let list = build_device_list(
+        &[inventory_with(vec![asleep])],
+        &[],
+        &AssetResolver::new(),
         &config,
+        &[],
     );
-    assert_eq!(list.len(), 1);
-}
 
-#[test]
-fn adopted_placeholder_stays_visible_with_a_non_receiver_link_too() {
-    // A device seen both over a receiver and directly by cable is not
-    // unreachable just because its receiver link's receiver is absent —
-    // the recorded direct route might still reach it. Hiding the card
-    // would dent the very "a sleeping device never drops out of the
-    // list" invariant this function exists to uphold.
-    let mut config = Config::default();
-    let mut device = DeviceConfig::default();
-    device
-        .links
-        .insert("receiver:aabb:slot:1".to_string(), LinkConfig::default());
-    device
-        .links
-        .insert("direct:046d:c08d".to_string(), LinkConfig::default());
-    config.devices.insert("unit:cafebabe".to_string(), device);
-    let id = mouse_identity("MX Master 3S");
-    let resolver = AssetResolver::new();
-
-    let mut list = Vec::new();
-    append_offline_known(
-        &mut list,
-        [("unit:cafebabe", &id)].into_iter(),
-        &resolver,
-        &HashSet::new(),
-        &config,
-    );
     assert_eq!(
         list.len(),
         1,
-        "a recorded direct link keeps the entry reachable even though its receiver link's receiver is absent"
+        "the saved identity must not add a second card"
+    );
+    let record = &list[0];
+    assert_eq!(record.config_key, "unit:79edb7ae");
+    assert!(!record.online);
+    assert_eq!(
+        record.model_info.as_ref().map(|model| model.model_ids[0]),
+        Some(0xb34c)
     );
 }
 
@@ -718,13 +677,7 @@ fn same_model_placeholder_is_blocked_by_a_live_unit() {
     let mut list = vec![live];
     let id = mouse_identity("MX Master 3S");
     let resolver = AssetResolver::new();
-    append_offline_known(
-        &mut list,
-        [("0b034", &id)].into_iter(),
-        &resolver,
-        &HashSet::new(),
-        &Config::default(),
-    );
+    append_offline_known(&mut list, [("0b034", &id)].into_iter(), &resolver);
     assert_eq!(list.len(), 1);
 }
 
@@ -740,8 +693,6 @@ fn legacy_same_model_placeholders_collapse_to_one_card() {
         &mut list,
         [("0b034", &id_a), ("2b034", &id_b)].into_iter(),
         &resolver,
-        &HashSet::new(),
-        &Config::default(),
     );
     assert_eq!(list.len(), 1);
 }

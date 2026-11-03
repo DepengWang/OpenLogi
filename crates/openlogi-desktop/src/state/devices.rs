@@ -313,6 +313,21 @@ pub(super) fn build_device_list(
                 canonical_device_key(&stable_id, paired.online.then_some(&identity))
                     .map(PhysicalDeviceKey::into_string);
             let route_key = stable_id.route_key();
+            // A paired slot that did not answer (asleep, or out of range) comes
+            // back offline without model info. The device is still the one this
+            // entry saved an identity for, so take its model and picture from
+            // there instead of showing the generic silhouette. An online device
+            // with an incomplete probe keeps what the probe gave.
+            let (model_key, asset, model_info, codename) = match saved_identity(config, &config_key)
+            {
+                Some((identity, model)) if model_info.is_none() && !paired.online => (
+                    model.model_key(),
+                    saved_asset(identity, Some(model), resolver),
+                    Some(model.clone()),
+                    identity.codename.clone(),
+                ),
+                _ => (model_key, asset, model_info, codename),
+            };
 
             let display_name = paired_display_name(asset.as_ref(), paired);
             let kind = effective_kind(paired.kind, asset.as_ref().and_then(|a| a.kind));
@@ -362,15 +377,10 @@ pub(super) fn build_device_list(
     for camera in cameras {
         list.push(camera_record(camera, resolver));
     }
-    let present_receivers: HashSet<String> = inventories
-        .iter()
-        .filter_map(|inv| inv.receiver.unique_id.as_deref())
-        .map(str::to_ascii_lowercase)
-        .collect();
     let known = config
         .known_identities()
         .filter(|(key, _)| !folded_keys.contains(*key));
-    append_offline_known(&mut list, known, resolver, &present_receivers, config);
+    append_offline_known(&mut list, known, resolver);
     apply_custom_names(&mut list, config);
     sort_device_list(&mut list);
     list
@@ -600,15 +610,14 @@ fn append_standalone(
 }
 
 /// Append an offline placeholder for every known device not already present in
-/// `list`, skipping unreachable devices and invalid transient identities.
+/// `list`, skipping invalid transient identities.
 ///
+/// A paired device stays in the list until the user deletes it, even when the
+/// receiver it is paired to is not plugged in (the work mouse while at home).
 /// The gates keep phantom cards out without conflating model identity with
 /// physical identity:
 /// - an exact physical key match against a live record — the device is already
 ///   in the list;
-/// - every route the entry could be reached by names a receiver that is not
-///   plugged in — its paired devices are unreachable until that receiver
-///   returns (e.g. the work receiver's mouse while at home);
 /// - a historical direct/routeless all-zero unit key, which never identified a
 ///   physical device;
 /// - for legacy model-scoped keys only, a model/PID already visible live or as
@@ -618,8 +627,6 @@ fn append_offline_known<'a>(
     list: &mut Vec<DeviceRecord>,
     known: impl Iterator<Item = (&'a str, &'a DeviceIdentity)>,
     resolver: &AssetResolver,
-    present_receivers: &HashSet<String>,
-    config: &Config,
 ) {
     let mut present_keys: HashSet<String> = list
         .iter()
@@ -634,9 +641,6 @@ fn append_offline_known<'a>(
 
     for (key, identity) in known {
         if PhysicalDeviceKey::is_transient(key) {
-            continue;
-        }
-        if entry_is_unreachable(key, config, present_receivers) {
             continue;
         }
         if present_keys.contains(key) {
@@ -668,52 +672,32 @@ fn append_offline_known<'a>(
     }
 }
 
-/// The receiver UID embedded in a `receiver:<uid>:slot:<n>` config key.
-fn receiver_uid_of(key: &str) -> Option<String> {
-    key.strip_prefix("receiver:")
-        .and_then(|rest| rest.split(':').next())
-        .map(str::to_ascii_lowercase)
+/// The identity saved for `config_key` together with its model info, when both
+/// exist. This is what lets a card keep its model and picture while the device
+/// itself is not answering.
+fn saved_identity<'a>(
+    config: &'a Config,
+    config_key: &str,
+) -> Option<(&'a DeviceIdentity, &'a DeviceModelInfo)> {
+    let identity = config.devices.get(config_key)?.identity.as_ref()?;
+    Some((identity, identity.model_info.as_ref()?))
 }
 
-/// Whether every receiver-shaped route this entry could be reached by names a
-/// receiver that is not currently plugged in.
-///
-/// Checks the entry key itself — the legacy shape for a device never adopted
-/// since Task 6 (`migrate_transport_scoped_keys` deliberately leaves a
-/// `receiver:` key as-is; it is only folded into its transport-free entry at
-/// runtime by `Config::adopt_route`) — plus every route recorded in the
-/// entry's persisted `links` table, since an adopted device's entry key may
-/// now be its own identity (`unit:…`) rather than `receiver:<uid>:slot:<n>`.
-/// A device with no receiver-shaped route at all (never receiver-paired, or
-/// never adopted) is never considered unreachable by this check — nor is a
-/// device with a mix of routes, one of them a non-receiver (direct/raw) link:
-/// a recorded direct route might still reach it, so only an entry whose
-/// *every* route is receiver-shaped is judged by receiver presence alone.
-fn entry_is_unreachable(key: &str, config: &Config, present_receivers: &HashSet<String>) -> bool {
-    let linked_routes: Vec<&str> = config
-        .devices
-        .get(key)
-        .into_iter()
-        .flat_map(|device| device.links.keys().map(String::as_str))
-        .collect();
-    // A linked route that is not receiver-shaped (a direct/raw route) means
-    // the device might still be reachable that way, so its presence alone
-    // keeps the entry reachable regardless of any receiver-shaped route's
-    // presence — only when *every* linked route names a receiver does
-    // that receiver's absence matter.
-    if linked_routes
-        .iter()
-        .any(|route| receiver_uid_of(route).is_none())
-    {
-        return false;
-    }
-    let mut receiver_uids = std::iter::once(key)
-        .chain(linked_routes)
-        .filter_map(receiver_uid_of)
-        .peekable();
-    receiver_uids.peek().is_some() && receiver_uids.all(|uid| !present_receivers.contains(&uid))
+/// The artwork for a saved identity: the registry id when one was recorded,
+/// otherwise whatever the model info resolves to.
+fn saved_asset(
+    identity: &DeviceIdentity,
+    model_info: Option<&DeviceModelInfo>,
+    resolver: &AssetResolver,
+) -> Option<ResolvedAsset> {
+    identity
+        .registry_model_id
+        .as_deref()
+        .and_then(|model_id| resolver.resolve_registry_model(model_id))
+        .or_else(|| {
+            model_info.and_then(|model| resolver.resolve(model, identity.codename.as_deref()))
+        })
 }
-
 /// The record's wire product id, used to suppress legacy same-model duplicate
 /// cards without conflating physical device keys.
 pub(super) fn record_wire_pid(record: &DeviceRecord) -> Option<String> {
@@ -746,15 +730,7 @@ fn offline_record(
         .model_info
         .clone()
         .or_else(|| model_info_from_legacy_model_key(config_key));
-    let asset = identity
-        .registry_model_id
-        .as_deref()
-        .and_then(|model_id| resolver.resolve_registry_model(model_id))
-        .or_else(|| {
-            model_info
-                .as_ref()
-                .and_then(|model| resolver.resolve(model, identity.codename.as_deref()))
-        });
+    let asset = saved_asset(identity, model_info.as_ref(), resolver);
     // Keep offline standalone records keyed exactly as before. The registry id
     // only selects artwork and must not alter configuration or deduplication.
     let model_key = model_info
